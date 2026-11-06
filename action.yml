@@ -1,4 +1,4 @@
-name: Specwise OpenAPI breaking-change check
+name: "ByteStay Specwise: OpenAPI breaking-change check"
 description: "Find the breaking changes a pull request makes to your OpenAPI spec: PR comment, annotations, fail unless labelled."
 author: ByteStay
 branding:
