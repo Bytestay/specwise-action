@@ -3,7 +3,7 @@
 [![CI](https://github.com/bytestay/specwise-action/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/bytestay/specwise-action/actions/workflows/ci.yml)
 [![E2E](https://github.com/bytestay/specwise-action/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/bytestay/specwise-action/actions/workflows/e2e.yml)
 [![Release](https://img.shields.io/github/v/release/bytestay/specwise-action)](https://github.com/bytestay/specwise-action/releases)
-[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-specwise-blue?logo=github)](https://github.com/marketplace/actions/specwise-openapi-breaking-change-check)
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-specwise-blue?logo=github)](https://github.com/marketplace/actions/bytestay-specwise-openapi-breaking-change-check)
 [![License: MIT](https://img.shields.io/github/license/bytestay/specwise-action)](LICENSE)
 
 Find the **breaking changes** a pull request makes to your **OpenAPI spec**, before your clients do:
