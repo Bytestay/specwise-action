@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/Bytestay/specwise-action/compare/v1.0.2...v1.0.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* unique Marketplace name, ByteStay Specwise ([#1](https://github.com/Bytestay/specwise-action/issues/1)) ([9b0e8b0](https://github.com/Bytestay/specwise-action/commit/9b0e8b08e678aff0a87f3ae42d6c697ee67dc2b2))
+
 ## [1.0.2](https://github.com/hybridforgelab/specwise-action/compare/v1.0.1...v1.0.2) (2026-11-05)
 
 
