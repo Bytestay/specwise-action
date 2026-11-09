@@ -85,8 +85,8 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   glob_match demo/v1/openapi.yaml 'demo/**/openapi.yaml'
   glob_match a/b/c/openapi.yaml 'a/**/openapi.yaml'
   glob_match openapi.yaml '**/openapi.yaml'
-  ! glob_match other/openapi.yaml 'demo/**/openapi.yaml'
-  ! glob_match demo/openapi.json 'demo/**/openapi.yaml'
+  ! glob_match other/openapi.yaml 'demo/**/openapi.yaml' || false
+  ! glob_match demo/openapi.json 'demo/**/openapi.yaml' || false
 }
 
 @test "no file matches spec-paths: a notice instead of a silent pass" {
@@ -244,7 +244,7 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
 @test "comment: false never calls the comments API" {
   INPUT_COMMENT=false run_action
   [ "$status" -eq 1 ]
-  ! grep -q comments "$MOCK_DIR/github.log"
+  ! grep -q comments "$MOCK_DIR/github.log" || false
 }
 
 @test "a changed Swagger 2.0 spec is listed as not checked, at no cost" {
