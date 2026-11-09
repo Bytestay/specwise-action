@@ -36,7 +36,7 @@ setup() {
   export GITHUB_OUTPUT="$BATS_TEST_TMPDIR/output" GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md"
   export GITHUB_REPOSITORY=acme/app GITHUB_API_URL=https://api.github.com GITHUB_SERVER_URL=https://github.com
   export GITHUB_SHA="$HEAD" GITHUB_EVENT_PATH="$BATS_TEST_TMPDIR/event.json"
-  export SPECWISE_RETRY_DELAY=0
+  export SPECWISE_RETRY_DELAY=0 SPECWISE_RATE_DELAY=0
   unset SPECWISE_API_URL SPECWISE_AUTH_HEADER
   pr_event
   : > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"
@@ -325,6 +325,30 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   INPUT_ON_QUOTA_EXCEEDED=fail run_action
   [ "$status" -eq 1 ]
   [[ $output == *"::error::Specwise monthly quota exhausted. Upgrade at"* ]]
+}
+
+@test "rate limit (429 without quota): retried, then compared" {
+  echo '{"message":"Too many requests"}' > "$MOCK_DIR/body_429"
+  printf '429\n429\n200\n' > "$MOCK_DIR/status_diff"
+  echo 9 > "$MOCK_DIR/quota"
+  run_action
+  [ "$status" -eq 1 ]
+  [ "$(out breaking)" = true ]
+  [ "$(out requests-used)" = 3 ]
+  [[ $output != *"quota exhausted"* ]]
+  [[ $output != *"rate limit"* ]]
+}
+
+@test "rate limit that doesn't clear: a warning, not a quota error, and the build passes" {
+  echo '{"message":"Too many requests"}' > "$MOCK_DIR/body_429"
+  echo 429 > "$MOCK_DIR/status_diff"
+  two_specs
+  INPUT_ON_QUOTA_EXCEEDED=fail run_action
+  [ "$status" -eq 0 ]
+  [ "$(out requests-used)" = 4 ]
+  [[ $output == *"::warning::Specwise rate limit (HTTP 429) after 3 retries"* ]]
+  [[ $output != *"quota exhausted"* ]]
+  [ "$(grep -c 'rate limited' "$GITHUB_STEP_SUMMARY")" -ge 2 ]
 }
 
 @test "API down: one retry, then a warning, and the build passes" {
