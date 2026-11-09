@@ -6,7 +6,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$HERE/lib.sh"
 
-PRICING="https://rapidapi.com/bytestay-bytestay-default/api/specwise-openapi-validator-and-diff-api/pricing"
+RAPIDAPI_PRICING="https://rapidapi.com/bytestay-bytestay-default/api/specwise-openapi-validator-and-diff-api/pricing"
+API_MARKET_PRICING="https://api.market/store/bytestay/specwise"
+# The marketplace follows the key that is set: RapidAPI or API.market (set only one)
+MARKET=rapidapi PRICING="$RAPIDAPI_PRICING"
+if [[ -n ${INPUT_API_MARKET_KEY:-} ]]; then MARKET=api.market PRICING="$API_MARKET_PRICING"; fi
 MARKER="<!-- specwise-action -->"
 OUT="${GITHUB_OUTPUT:-/dev/null}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -34,16 +38,20 @@ MAX_REQ="${INPUT_MAX_REQUESTS:-10}"
 [[ $MAX_REQ =~ ^[0-9]+$ ]] || { echo "::error::max-requests must be a whole number."; exit 1; }
 ALLOW_LABEL="$(trim "${INPUT_ALLOW_LABEL:-}")"
 
-if [[ -z ${INPUT_RAPIDAPI_KEY:-} && -z ${SPECWISE_AUTH_HEADER:-} ]]; then
+if [[ -n ${INPUT_RAPIDAPI_KEY:-} && -n ${INPUT_API_MARKET_KEY:-} ]]; then
+  echo "::error::Set rapidapi-key or api-market-key, not both."; exit 1
+fi
+if [[ -z ${INPUT_RAPIDAPI_KEY:-}${INPUT_API_MARKET_KEY:-} && -z ${SPECWISE_AUTH_HEADER:-} ]]; then
   if [[ ${GITHUB_EVENT_NAME:-} == pull_request* ]]; then
-    echo "::warning::Specwise skipped: no rapidapi-key. Pull requests from forks don't get repository secrets."
+    echo "::warning::Specwise skipped: no rapidapi-key or api-market-key. Pull requests from forks don't get repository secrets."
     output passed true; output requests-used 0
     exit 0
   fi
-  echo "::error::rapidapi-key is empty. Subscribe to the Specwise API (free Basic plan) at $PRICING and store the key as a secret."
+  echo "::error::No API key: set rapidapi-key or api-market-key. Subscribe to the Specwise API (free plan) at $RAPIDAPI_PRICING or $API_MARKET_PRICING and store the key as a secret."
   exit 1
 fi
 [[ -n ${INPUT_RAPIDAPI_KEY:-} ]] && echo "::add-mask::$INPUT_RAPIDAPI_KEY"
+[[ -n ${INPUT_API_MARKET_KEY:-} ]] && echo "::add-mask::$INPUT_API_MARKET_KEY"
 
 PR=""
 if [[ ${GITHUB_EVENT_NAME:-} == pull_request* && -f ${GITHUB_EVENT_PATH:-} ]]; then
@@ -84,11 +92,13 @@ not_analysed() { # not_analysed FILE REASON
 }
 # handle_error FILE ENDPOINT: everything but 200. Returns 0 when the file should still count as processed.
 handle_error() {
-  local f="$1" detail line
-  case "$code" in
+  local f="$1" detail line kind="$code"
+  # The API.market gateway answers 400 to a missing or wrong key; Specwise's own 4xx never mention it
+  if [[ $code == 400 ]] && grep -qi 'api-market-key' "$WORK/resp.json" 2>/dev/null; then kind=401; fi
+  case "$kind" in
     401|403)
       detail="$(jq -r '.message // empty' "$WORK/resp.json" 2>/dev/null || true)"
-      echo "::error::Specwise refused the key (HTTP $code${detail:+: $detail}). Subscribe (free Basic plan) at $PRICING."
+      echo "::error::Specwise refused the key (HTTP $code${detail:+: $detail}). Subscribe (free plan) at $PRICING."
       not_analysed "$f" "key refused (HTTP $code)"; stop="key refused" ;;
     413)
       echo "::warning file=$f::Specwise skipped this spec: request too large."
