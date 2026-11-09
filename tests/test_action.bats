@@ -28,7 +28,7 @@ setup() {
   echo 200 > "$MOCK_DIR/status_validate"
   echo '[]' > "$MOCK_DIR/gh_labels.json"
   export PATH="$ROOT/tests/bin:$PATH"
-  export INPUT_RAPIDAPI_KEY=test-key INPUT_BASE_REF="" INPUT_FAIL_ON_BREAKING=true INPUT_ALLOW_LABEL=breaking-ok
+  export INPUT_RAPIDAPI_KEY=test-key INPUT_API_MARKET_KEY="" INPUT_BASE_REF="" INPUT_FAIL_ON_BREAKING=true INPUT_ALLOW_LABEL=breaking-ok
   export INPUT_VALIDATE=false INPUT_COMMENT=true INPUT_MAX_REQUESTS=10 INPUT_ON_QUOTA_EXCEEDED=warn
   export INPUT_GITHUB_TOKEN=gh-token
   export INPUT_SPEC_PATHS="**/openapi.yaml,**/openapi.yml,**/openapi.json,**/*.openapi.yaml,**/*.openapi.yml,**/*.openapi.json"
@@ -379,14 +379,16 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
 @test "no key on a pull request (forks): warning, passes" {
   INPUT_RAPIDAPI_KEY="" run_action
   [ "$status" -eq 0 ]
-  [[ $output == *"::warning::Specwise skipped: no rapidapi-key."* ]]
+  [[ $output == *"::warning::Specwise skipped: no rapidapi-key or api-market-key."* ]]
 }
 
 @test "no key on a push: error" {
   export GITHUB_EVENT_NAME=push
   INPUT_RAPIDAPI_KEY="" run_action
   [ "$status" -eq 1 ]
-  [[ $output == *"::error::rapidapi-key is empty."* ]]
+  [[ $output == *"::error::No API key: set rapidapi-key or api-market-key."* ]]
+  [[ $output == *"rapidapi.com/bytestay-bytestay-default/api/specwise-openapi-validator-and-diff-api/pricing"* ]]
+  [[ $output == *"https://api.market/store/bytestay/specwise"* ]]
 }
 
 @test "push: compares with the previous commit, no comment" {
@@ -427,7 +429,50 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   [ "$(requests)" -eq 0 ]
 }
 
-@test "the key is masked" {
+@test "the key is masked and sent as RapidAPI headers" {
   run_action
   [[ $output == *"::add-mask::test-key"* ]]
+  grep -qx 'https://specwise-openapi-validator-and-diff-api.p.rapidapi.com/v1/openapi/diff' "$MOCK_DIR/specwise_calls.log"
+  grep -qx 'X-RapidAPI-Key: test-key' "$MOCK_DIR/specwise_calls.log"
+  grep -qx 'X-RapidAPI-Host: specwise-openapi-validator-and-diff-api.p.rapidapi.com' "$MOCK_DIR/specwise_calls.log"
+  [ "$(grep -ci 'x-api-market-key' "$MOCK_DIR/specwise_calls.log")" = 0 ]
+}
+
+@test "an api-market-key is masked and sent to the API.market gateway" {
+  export INPUT_RAPIDAPI_KEY="" INPUT_API_MARKET_KEY=am-key
+  run_action
+  [ "$status" -eq 1 ] # the fixture revision has breaking changes
+  [ "$(out breaking-changes)" = 3 ]
+  [[ $output == *"::add-mask::am-key"* ]]
+  grep -qx 'https://prod.api.market/api/v1/bytestay/specwise/v1/openapi/diff' "$MOCK_DIR/specwise_calls.log"
+  grep -qx 'x-api-market-key: am-key' "$MOCK_DIR/specwise_calls.log"
+  [ "$(grep -ci 'rapidapi' "$MOCK_DIR/specwise_calls.log")" = 0 ]
+  [ "$(out quota-remaining)" = "" ]
+}
+
+@test "API.market refuses the key (400): error with the API.market store link, fails" {
+  export INPUT_RAPIDAPI_KEY="" INPUT_API_MARKET_KEY=am-key
+  echo '{"message":"Invalid x-api-market-key or x-magicapi-key defined in headers"}' > "$MOCK_DIR/body_400"
+  echo 400 > "$MOCK_DIR/status_diff"
+  run_action
+  [ "$status" -eq 1 ]
+  [[ $output == *"::error::Specwise refused the key (HTTP 400: Invalid x-api-market-key"* ]]
+  [[ $output == *"https://api.market/store/bytestay/specwise"* ]]
+  [[ $output != *"rapidapi.com"* ]]
+}
+
+@test "a 400 that isn't the gateway's key message is not a refused key" {
+  echo '{"detail":"bad request"}' > "$MOCK_DIR/body_400"
+  echo 400 > "$MOCK_DIR/status_diff"
+  run_action
+  [ "$status" -eq 0 ]
+  [[ $output != *"refused the key"* ]]
+  [[ $output == *"Specwise API unavailable (HTTP 400)"* ]]
+}
+
+@test "both keys set: fails early" {
+  INPUT_API_MARKET_KEY=am-key run_action
+  [ "$status" -eq 1 ]
+  [[ $output == *"::error::Set rapidapi-key or api-market-key, not both."* ]]
+  [ "$(requests)" -eq 0 ]
 }
