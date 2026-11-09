@@ -121,6 +121,7 @@ Most repositories have one spec. A pull request then costs one request, and only
 | this branch's spec can't be parsed (422) | error annotation on the line, step fails |
 | the base version can't be parsed | warning, that spec is skipped |
 | quota exhausted (429) | `on-quota-exceeded: warn` gives a warning and the step passes; `fail` fails it |
+| rate limit (429 that doesn't mention the quota) | up to 3 retries, then a warning: the step passes |
 | API down or timing out | one retry, then a warning: **your build is never failed because of us** |
 | no permission to comment | a notice; the report is in the job summary |
 

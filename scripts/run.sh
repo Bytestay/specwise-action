@@ -61,12 +61,21 @@ fi
 
 # 3. One diff request per changed spec (plus one validate request with validate: true)
 requests=0 quota="" stop=""
-api() { # api ENDPOINT BODY_FILE → sets $code and leaves the response in $WORK/resp.json; retries once on 000/5xx
+# quota_429: true when a 429 is the monthly quota. RapidAPI also answers 429 to the per-second rate limit,
+# and that one says nothing about the quota.
+quota_429() { grep -qi 'quota' "$WORK/resp.json" 2>/dev/null; }
+api() { # api ENDPOINT BODY_FILE → sets $code and leaves the response in $WORK/resp.json
+  # retries once on 000/5xx, and up to 3 times on a rate-limit 429
+  local tries=0
   code="$(call_api "$1" "$2" "$WORK/resp.json" "$WORK/headers.txt")"; requests=$((requests + 1))
   if [[ $code == 000 || $code =~ ^5 ]]; then
     sleep "${SPECWISE_RETRY_DELAY:-5}"
     code="$(call_api "$1" "$2" "$WORK/resp.json" "$WORK/headers.txt")"; requests=$((requests + 1))
   fi
+  while [[ $code == 429 ]] && ! quota_429 && (( tries < 3 )); do
+    tries=$((tries + 1)); sleep "${SPECWISE_RATE_DELAY:-$tries}"
+    code="$(call_api "$1" "$2" "$WORK/resp.json" "$WORK/headers.txt")"; requests=$((requests + 1))
+  done
   local q; q="$(header_value "$WORK/headers.txt" x-ratelimit-requests-remaining)"; [[ -n $q ]] && quota="$q"
   return 0
 }
@@ -96,6 +105,10 @@ handle_error() {
         record --arg file "$f" --arg detail "$detail" '{file: $file, status: "invalid", reason: $detail}'
       fi ;;
     429)
+      if ! quota_429; then
+        echo "::warning::Specwise rate limit (HTTP 429) after 3 retries: the remaining specs were not checked. Your build is not failed because of it."
+        not_analysed "$f" "rate limited (HTTP 429)"; stop="rate limited"; return 0
+      fi
       if [[ ${INPUT_ON_QUOTA_EXCEEDED:-warn} == fail ]]; then
         echo "::error::Specwise monthly quota exhausted. Upgrade at $PRICING."
         record --arg file "$f" '{file: $file, status: "failed", reason: "quota exhausted (HTTP 429)"}'
