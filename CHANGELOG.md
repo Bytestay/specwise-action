@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/Bytestay/specwise-action/compare/v1.1.0...v1.1.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* escape API text in workflow commands ([#12](https://github.com/Bytestay/specwise-action/issues/12)) ([6fd7321](https://github.com/Bytestay/specwise-action/commit/6fd7321d899ac3ce8dd49648116387427c78de70))
+
 ## [1.1.0](https://github.com/Bytestay/specwise-action/compare/v1.0.3...v1.1.0) (2026-11-09)
 
 
