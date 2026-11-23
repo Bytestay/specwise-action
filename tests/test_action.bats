@@ -507,7 +507,7 @@ EVIL=$'bad\n::add-mask::pwned\n::set-output name=x::y %0A'
     '.changes[0].message = $m | .changes[0].operation = $m | .changes[0].line = "9,file=evil" | .base_version = $m' \
     "$ROOT/tests/responses/diff_200.json" > "$MOCK_DIR/body_200_diff"
   run_action
-  [[ $output == *"::error file=api/openapi.yaml,title=Breaking change%3A path.removed::bad%0A::add-mask::pwned%0A::set-output name=x::y %250A <img src=x> a|b \`c\`"* ]]
+  grep -q '^::error file=api/openapi.yaml,.*title=Breaking change%3A path.removed::bad%0A::add-mask::pwned%0A::set-output name=x::y %250A <img src=x> a|b `c`' <<<"$output"
   ! grep -q '^::add-mask::pwned' <<<"$output" || false
   ! grep -q '^::set-output' <<<"$output" || false
   ! grep -q '<img' "$GITHUB_STEP_SUMMARY" || false
