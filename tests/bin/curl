@@ -8,6 +8,7 @@
 # GitHub calls are logged as "METHOD path" in github.log and answer from:
 #   gh_labels.json (status gh_labels_status), gh_comments.json, contents/<path> (404 when missing),
 #   gh_comment_status for POST/PATCH of comments (the body sent is saved as gh_<method>.json).
+printf '%s\n' "$@" >> "$MOCK_DIR/argv.log" # what a process listing would show
 out="" headers="" url="" fmt="" data="" method=GET hdrs=()
 while (($#)); do
   case "$1" in
@@ -15,7 +16,7 @@ while (($#)); do
     -D) headers="$2"; shift ;;
     -w) fmt="$2"; shift ;;
     -X) method="$2"; shift ;;
-    -H) hdrs+=("$2"); shift ;;
+    -H) if [[ $2 == @* ]]; then while IFS= read -r l; do hdrs+=("$l"); done < "${2#@}"; else hdrs+=("$2"); fi; shift ;;
     --max-time) shift ;;
     --data-binary) data="$2"; shift ;;
     http*) url="$1" ;;
@@ -40,7 +41,7 @@ if [[ $url == "${GITHUB_API_URL:-https://api.github.com}"/* ]]; then
     "POST "*/comments|"PATCH "*/comments/*)
       cp "${data#@}" "$MOCK_DIR/gh_$(tr '[:upper:]' '[:lower:]' <<<"$method").json"
       echo '{"id": 99, "html_url": "https://github.com/acme/app/pull/7#issuecomment-99"}' > "$MOCK_DIR/comment_reply.json"
-      reply "$(cat "$MOCK_DIR/gh_comment_status" 2>/dev/null || echo 201)" "$MOCK_DIR/comment_reply.json" ;;
+      reply "$(cat "$MOCK_DIR/gh_$(tr '[:upper:]' '[:lower:]' <<<"$method")_status" 2>/dev/null || cat "$MOCK_DIR/gh_comment_status" 2>/dev/null || echo 201)" "$MOCK_DIR/comment_reply.json" ;;
     "GET "*/contents/*)
       file="${path#*/contents/}"; file="${file%%\?*}"
       if [[ -f $MOCK_DIR/contents/$file ]]; then
