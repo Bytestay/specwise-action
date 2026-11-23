@@ -1,10 +1,41 @@
 #!/usr/bin/env bash
 # Functions used by run.sh; sourced by the bats tests too.
 
+# Test overrides (fake API) only count under the repo's own test harness: an earlier step that writes
+# GITHUB_ENV must not be able to redirect the key to another host.
+if [[ ${SPECWISE_TEST_HARNESS:-} != 1 ]]; then
+  unset SPECWISE_API_URL SPECWISE_AUTH_HEADER SPECWISE_RETRY_DELAY SPECWISE_RATE_DELAY
+fi
+
 SPECWISE_HOST="specwise-openapi-validator-and-diff-api.p.rapidapi.com"
 API_MARKET_URL="https://prod.api.market/api/v1/bytestay/specwise"
 MAX_BYTES=921600 # both versions go in one request, and the API takes at most 2 MB per request
 ZERO_SHA="0000000000000000000000000000000000000000"
+
+# Workflow commands. Every value is escaped by GitHub's rules: data % CR LF; properties also : and ,.
+esc_data() { local s="$1"; s="${s//'%'/%25}"; s="${s//$'\r'/%0D}"; s="${s//$'\n'/%0A}"; printf '%s' "$s"; }
+esc_prop() { local s; s="$(esc_data "$1")"; s="${s//:/%3A}"; s="${s//,/%2C}"; printf '%s' "$s"; }
+wf() { printf '::%s::%s\n' "$1" "$(esc_data "$2")"; }                              # wf LEVEL MESSAGE
+wf_file() { printf '::%s file=%s::%s\n' "$1" "$(esc_prop "$2")" "$(esc_data "$3")"; } # wf_file LEVEL FILE MESSAGE
+# wf_at LEVEL FILE LINE TITLE MESSAGE: LINE is used only when it is a whole number
+wf_at() {
+  local at=""; [[ $3 =~ ^[0-9]+$ ]] && at=",line=$3"
+  printf '::%s file=%s%s,title=%s::%s\n' "$1" "$(esc_prop "$2")" "$at" "$(esc_prop "$4")" "$(esc_data "$5")"
+}
+
+# output NAME VALUE: a step output in the heredoc form with a random delimiter, never NAME=VALUE
+output() {
+  local d; d="ghadelim_$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  { printf '%s<<%s\n' "$1" "$d"; printf '%s\n' "$2"; printf '%s\n' "$d"; } >> "${OUT:-/dev/null}"
+}
+
+# header_file HEADER… → prints the path of a 0600 file holding the headers (for curl -H @file), so keys
+# never sit on curl's argv where ps shows them. The caller removes it.
+header_file() {
+  local f h; f="$(umask 077; mktemp "${TMPDIR:-/tmp}/specwise-hdr.XXXXXX")"
+  for h in "$@"; do printf '%s\n' "$h" >> "$f"; done
+  printf '%s' "$f"
+}
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
@@ -61,7 +92,7 @@ spec_kind() {
 # skip_reason FILE → empty when the file can be compared, else why not (no request spent)
 skip_reason() {
   local file="$1"
-  if [[ ! -f $file ]]; then echo "not found"; return 0; fi
+  if [[ ! -f $file || -L $file ]]; then echo "not found"; return 0; fi
   if (( $(wc -c < "$file") > MAX_BYTES )); then echo "larger than 900 KiB"; return 0; fi
   case "$(spec_kind "$file")" in
     swagger2) echo "Swagger 2.0: the diff needs OpenAPI 3.x" ;;
@@ -72,11 +103,13 @@ skip_reason() {
 
 # gh_api METHOD PATH OUT [JSON_FILE] → prints the HTTP status ("000" when the request itself failed)
 gh_api() {
-  local method="$1" path="$2" out="$3" data="${4:-}" code args=()
+  local method="$1" path="$2" out="$3" data="${4:-}" code args=() hf
   [[ -n $data ]] && args=(-H "Content-Type: application/json" --data-binary "@$data")
+  hf="$(header_file "Authorization: Bearer ${INPUT_GITHUB_TOKEN:-}")"
   code="$(curl -sS --max-time 30 -o "$out" -w '%{http_code}' -X "$method" \
-    -H "Authorization: Bearer ${INPUT_GITHUB_TOKEN:-}" -H "Accept: application/vnd.github+json" \
+    -H "@$hf" -H "Accept: application/vnd.github+json" \
     ${args[@]+"${args[@]}"} "${GITHUB_API_URL:-https://api.github.com}/$path" 2>/dev/null)" || code="000"
+  rm -f "$hf"
   printf '%s' "${code:-000}"
 }
 
@@ -124,13 +157,16 @@ base_file() {
 # call_api ENDPOINT BODY_FILE OUT HEADERS → prints the HTTP status ("000" when the request itself failed)
 call_api() {
   local endpoint="$1" body="$2" out="$3" headers="$4" code
-  local base="https://$SPECWISE_HOST" auth=(-H "X-RapidAPI-Key: ${INPUT_RAPIDAPI_KEY:-}" -H "X-RapidAPI-Host: $SPECWISE_HOST")
-  if [[ ${MARKET:-} == api.market ]]; then base="$API_MARKET_URL"; auth=(-H "x-api-market-key: ${INPUT_API_MARKET_KEY:-}"); fi
+  local base="https://$SPECWISE_HOST" hf
+  local hdrs=("X-RapidAPI-Key: ${INPUT_RAPIDAPI_KEY:-}" "X-RapidAPI-Host: $SPECWISE_HOST")
+  if [[ ${MARKET:-} == api.market ]]; then base="$API_MARKET_URL"; hdrs=("x-api-market-key: ${INPUT_API_MARKET_KEY:-}"); fi
   local url="${SPECWISE_API_URL:-$base}/v1/$endpoint"
-  # SPECWISE_API_URL / SPECWISE_AUTH_HEADER let the tests and maintainers call the API directly
-  [[ -n ${SPECWISE_AUTH_HEADER:-} ]] && auth=(-H "$SPECWISE_AUTH_HEADER")
+  # SPECWISE_API_URL / SPECWISE_AUTH_HEADER (test harness only) let the tests call the API directly
+  [[ -n ${SPECWISE_AUTH_HEADER:-} ]] && hdrs=("$SPECWISE_AUTH_HEADER")
+  hf="$(header_file "${hdrs[@]}")"
   code="$(curl -sS --max-time 60 -o "$out" -D "$headers" -w '%{http_code}' \
-    -X POST "$url" "${auth[@]}" -H "Content-Type: application/json" --data-binary "@$body" 2>/dev/null)" || code="000"
+    -X POST "$url" -H "@$hf" -H "Content-Type: application/json" --data-binary "@$body" 2>/dev/null)" || code="000"
+  rm -f "$hf"
   printf '%s' "${code:-000}"
 }
 

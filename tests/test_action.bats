@@ -36,7 +36,7 @@ setup() {
   export GITHUB_OUTPUT="$BATS_TEST_TMPDIR/output" GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md"
   export GITHUB_REPOSITORY=acme/app GITHUB_API_URL=https://api.github.com GITHUB_SERVER_URL=https://github.com
   export GITHUB_SHA="$HEAD" GITHUB_EVENT_PATH="$BATS_TEST_TMPDIR/event.json"
-  export SPECWISE_RETRY_DELAY=0 SPECWISE_RATE_DELAY=0
+  export SPECWISE_TEST_HARNESS=1 SPECWISE_RETRY_DELAY=0 SPECWISE_RATE_DELAY=0
   unset SPECWISE_API_URL SPECWISE_AUTH_HEADER
   pr_event
   : > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"
@@ -56,7 +56,8 @@ two_specs() { # both specs changed by the pull request
 }
 
 run_action() { cd "$REPO" && run "$ROOT/scripts/run.sh"; }
-out() { grep "^$1=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-; }
+# step outputs are in the heredoc form: NAME<<DELIM, the value, DELIM
+out() { awk -v n="$1" '$0 ~ "^" n "<<" { getline v; val = v } END { print val }' "$GITHUB_OUTPUT"; }
 requests() { grep -c . "$MOCK_DIR/requests.log" 2>/dev/null || echo 0; }
 comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
 
@@ -158,9 +159,9 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   grep -q "POST repos/acme/app/issues/7/comments" "$MOCK_DIR/github.log"
   body="$(comment_body post)"
   [[ $body == "<!-- specwise-action -->"* ]]
-  [[ $body == *"**3 breaking changes** · 6 changes in total · version \`1.2.0\` → \`1.3.0\` · suggested bump: **major**"* ]]
+  [[ $body == *"**3 breaking changes** · 6 changes in total · version <code>1.2.0</code> → <code>1.3.0</code> · suggested bump: **major**"* ]]
   [[ $body == *"[line 12](https://github.com/acme/app/blob/$HEAD/api/openapi.yaml#L12)"* ]]
-  [[ $body == *"add the label \`breaking-ok\`"* ]]
+  [[ $body == *"add the label <code>breaking-ok</code>"* ]]
   [[ $body != *"legacy/openapi.yaml"* ]] # unchanged: not worth a line
   grep -q "## Specwise ❌" "$GITHUB_STEP_SUMMARY"
   [[ $body == *"<sub>2 unchanged specs skipped · requests used: 1 · quota left this month: 13 · "* ]]
@@ -174,7 +175,7 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   [[ $output != *"::error"* ]]
   [ "$(out passed)" = true ]
   [ "$(out breaking)" = true ]
-  [[ $(comment_body post) == *"The label \`breaking-ok\` accepts these breaking changes."* ]]
+  [[ $(comment_body post) == *"The label <code>breaking-ok</code> accepts these breaking changes."* ]]
 }
 
 @test "labels: falls back to the event payload when the API can't be read" {
@@ -224,7 +225,7 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
 }
 
 @test "an earlier comment is updated, even when nothing changed any more" {
-  jq -n '[{id: 5, body: "hello"}, {id: 41, body: "<!-- specwise-action -->\nold"}]' > "$MOCK_DIR/gh_comments.json"
+  jq -n '[{id: 5, user: {login: "someone"}, body: "hello"}, {id: 41, user: {login: "github-actions[bot]"}, body: "<!-- specwise-action -->\nold"}]' > "$MOCK_DIR/gh_comments.json"
   cp "$FIX/base.yaml" "$REPO/api/openapi.yaml"; HEAD="$(commit revert)"; pr_event
   run_action
   [ "$status" -eq 0 ]
@@ -251,7 +252,7 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   printf '\n' >> "$REPO/legacy/openapi.yaml"; HEAD="$(commit legacy)"; pr_event
   run_action
   [ "$(requests)" -eq 1 ]
-  [[ $(comment_body post) == *"| \`legacy/openapi.yaml\` | Swagger 2.0: the diff needs OpenAPI 3.x |"* ]]
+  [[ $(comment_body post) == *"| <code>legacy/openapi.yaml</code> | Swagger 2.0: the diff needs OpenAPI 3.x |"* ]]
 }
 
 @test "a new spec: nothing to compare, no request" {
@@ -259,7 +260,7 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   run_action
   [ "$status" -eq 1 ] # api/openapi.yaml still has its breaking changes
   [ "$(requests)" -eq 1 ]
-  grep -q "Nothing to compare them with yet: \`api/orders.openapi.yaml\`" "$GITHUB_STEP_SUMMARY"
+  grep -q "Nothing to compare them with yet: <code>api/orders.openapi.yaml</code>" "$GITHUB_STEP_SUMMARY"
 }
 
 # ---------- validate ----------
@@ -475,4 +476,97 @@ comment_body() { jq -r '.body' "$MOCK_DIR/gh_$1.json"; }
   [ "$status" -eq 1 ]
   [[ $output == *"::error::Set rapidapi-key or api-market-key, not both."* ]]
   [ "$(requests)" -eq 0 ]
+}
+
+# ---------- API text in workflow commands, outputs and Markdown ----------
+
+EVIL=$'bad\n::add-mask::pwned\n::set-output name=x::y %0A'
+
+@test "401 message with a newline and ::add-mask:: is escaped in the workflow command" {
+  echo 401 > "$MOCK_DIR/status_diff"
+  jq -nc --arg m "$EVIL" '{message: $m}' > "$MOCK_DIR/body_401"
+  run_action
+  [ "$status" -eq 1 ]
+  [[ $output == *"HTTP 401: bad%0A::add-mask::pwned%0A::set-output name=x::y %250A"* ]]
+  ! grep -q '^::add-mask::pwned' <<<"$output" || false
+  ! grep -q '^::set-output' <<<"$output" || false
+  grep -qx '::add-mask::test-key' <<<"$output"
+}
+
+@test "a 422 detail with workflow commands is escaped" {
+  echo 422 > "$MOCK_DIR/status_diff"
+  jq -nc --arg m "$EVIL line 9" '{detail: $m}' > "$MOCK_DIR/body_422_diff"
+  run_action
+  [[ $output == *"::error file=api/openapi.yaml,line=9,title=Specwise could not parse this spec::bad%0A::add-mask::pwned%0A::set-output name=x::y %250A line 9"* ]]
+  ! grep -q '^::add-mask::pwned' <<<"$output" || false
+  ! grep -q '^::set-output' <<<"$output" || false
+}
+
+@test "diff text with workflow commands and Markdown is escaped in annotations, summary and comment" {
+  jq --arg m "$EVIL <img src=x> a|b \`c\`" --arg k $'x,y:z\n::warning::f' \
+    '.changes[0].message = $m | .changes[0].operation = $m | .changes[0].line = "9,file=evil" | .base_version = $m' \
+    "$ROOT/tests/responses/diff_200.json" > "$MOCK_DIR/body_200_diff"
+  run_action
+  grep -q '^::error file=api/openapi.yaml,.*title=Breaking change%3A path.removed::bad%0A::add-mask::pwned%0A::set-output name=x::y %250A <img src=x> a|b `c`' <<<"$output"
+  ! grep -q '^::add-mask::pwned' <<<"$output" || false
+  ! grep -q '^::set-output' <<<"$output" || false
+  ! grep -q '<img' "$GITHUB_STEP_SUMMARY" || false
+  grep -qF '&lt;img src=x&gt; a\|b &#96;c&#96;' "$GITHUB_STEP_SUMMARY"
+  [ "$(grep -c '^::' "$GITHUB_STEP_SUMMARY" || true)" = 0 ]
+  ! grep -q '<img' "$MOCK_DIR/gh_post.json" || false
+}
+
+@test "a file name with a comma or :: cannot forge annotation properties" {
+  source "$ROOT/scripts/lib.sh"
+  run wf_file warning $'a,b:c::d\ne' "100%"
+  [ "$output" = "::warning file=a%2Cb%3Ac%3A%3Ad%0Ae::100%25" ]
+  run wf_at error "f" "7,file=x" "t,i:tle" "m"
+  [ "$output" = "::error file=f,title=t%2Ci%3Atle::m" ]
+}
+
+@test "outputs use the heredoc form with a random delimiter, and a hostile quota header is dropped" {
+  echo '5x%0A::add-mask::x' > "$MOCK_DIR/quota"
+  run_action
+  ! grep -q '^[a-z-]*=' "$GITHUB_OUTPUT" || false
+  [ "$(grep -c '<<ghadelim_' "$GITHUB_OUTPUT")" = 9 ]
+  [ "$(out breaking)" = true ]
+  [ -z "$(out quota-remaining)" ]
+}
+
+@test "the comment is looked up only among the token's own comments" {
+  jq -n '[{id: 42, user: {login: "mallory"}, body: "<!-- specwise-action -->\nfake"}]' > "$MOCK_DIR/gh_comments.json"
+  run_action
+  ! grep -q '^PATCH ' "$MOCK_DIR/github.log" || false
+  grep -q '^POST repos/acme/app/issues/7/comments$' "$MOCK_DIR/github.log"
+}
+
+@test "when updating the comment fails, a new comment is posted" {
+  jq -n '[{id: 42, user: {login: "github-actions[bot]"}, body: "<!-- specwise-action -->\nold"}]' > "$MOCK_DIR/gh_comments.json"
+  echo 403 > "$MOCK_DIR/gh_patch_status"
+  run_action
+  grep -q '^PATCH repos/acme/app/issues/comments/42$' "$MOCK_DIR/github.log"
+  grep -q '^POST repos/acme/app/issues/7/comments$' "$MOCK_DIR/github.log"
+  [ "$(out comment-url)" = "https://github.com/acme/app/pull/7#issuecomment-99" ]
+}
+
+@test "a tracked symlink to a spec is not followed" {
+  cd "$REPO"; ln -s /etc/hosts api/link.openapi.yaml
+  HEAD="$(commit link)"; pr_event
+  run "$ROOT/scripts/run.sh"
+  [[ $output != *link.openapi* ]]
+  ! grep -q 'link.openapi' "$GITHUB_STEP_SUMMARY" || false
+}
+
+@test "keys are not on curl's command line" {
+  run_action
+  [ -s "$MOCK_DIR/argv.log" ]
+  ! grep -q 'test-key\|gh-token' "$MOCK_DIR/argv.log" || false
+  grep -qx 'X-RapidAPI-Key: test-key' "$MOCK_DIR/specwise_calls.log"
+}
+
+@test "test overrides are ignored outside the test harness" {
+  export SPECWISE_TEST_HARNESS=0 SPECWISE_API_URL=http://evil.example SPECWISE_AUTH_HEADER="X-Evil: 1"
+  run_action
+  ! grep -q evil "$MOCK_DIR/specwise_calls.log" || false
+  grep -q 'https://specwise-openapi-validator-and-diff-api.p.rapidapi.com/v1/openapi/diff' "$MOCK_DIR/specwise_calls.log"
 }

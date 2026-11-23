@@ -19,39 +19,38 @@ trap 'rm -rf "$WORK"' EXIT
 RESULTS="$WORK/results.jsonl"
 : > "$RESULTS"
 
-output() { printf '%s=%s\n' "$1" "$2" >> "$OUT"; }
 record() { jq -cn "$@" >> "$RESULTS"; } # one JSON object per spec
 flag() { # flag NAME VALUE → validates a true/false input
-  case "$2" in true|false) ;; *) echo "::error::$1 must be true or false (got '$2')."; exit 1;; esac
+  case "$2" in true|false) ;; *) wf error "$1 must be true or false (got '$2')."; exit 1;; esac
 }
 
 # 1. Preflight
 for tool in curl jq git; do
-  command -v "$tool" >/dev/null || { echo "::error::Specwise needs $tool on the runner."; exit 1; }
+  command -v "$tool" >/dev/null || { wf error "Specwise needs $tool on the runner."; exit 1; }
 done
 FAIL_ON_BREAKING="${INPUT_FAIL_ON_BREAKING:-true}"; flag fail-on-breaking "$FAIL_ON_BREAKING"
 VALIDATE="${INPUT_VALIDATE:-false}"; flag validate "$VALIDATE"
 COMMENT="${INPUT_COMMENT:-true}"; flag comment "$COMMENT"
 case "${INPUT_ON_QUOTA_EXCEEDED:-warn}" in warn|fail) ;; *)
-  echo "::error::on-quota-exceeded must be warn or fail."; exit 1;; esac
+  wf error "on-quota-exceeded must be warn or fail."; exit 1;; esac
 MAX_REQ="${INPUT_MAX_REQUESTS:-10}"
-[[ $MAX_REQ =~ ^[0-9]+$ ]] || { echo "::error::max-requests must be a whole number."; exit 1; }
+[[ $MAX_REQ =~ ^[0-9]+$ ]] || { wf error "max-requests must be a whole number."; exit 1; }
 ALLOW_LABEL="$(trim "${INPUT_ALLOW_LABEL:-}")"
 
 if [[ -n ${INPUT_RAPIDAPI_KEY:-} && -n ${INPUT_API_MARKET_KEY:-} ]]; then
-  echo "::error::Set rapidapi-key or api-market-key, not both."; exit 1
+  wf error "Set rapidapi-key or api-market-key, not both."; exit 1
 fi
 if [[ -z ${INPUT_RAPIDAPI_KEY:-}${INPUT_API_MARKET_KEY:-} && -z ${SPECWISE_AUTH_HEADER:-} ]]; then
   if [[ ${GITHUB_EVENT_NAME:-} == pull_request* ]]; then
-    echo "::warning::Specwise skipped: no rapidapi-key or api-market-key. Pull requests from forks don't get repository secrets."
+    wf warning "Specwise skipped: no rapidapi-key or api-market-key. Pull requests from forks don't get repository secrets."
     output passed true; output requests-used 0
     exit 0
   fi
-  echo "::error::No API key: set rapidapi-key or api-market-key. Subscribe to the Specwise API (free plan) at $RAPIDAPI_PRICING or $API_MARKET_PRICING and store the key as a secret."
+  wf error "No API key: set rapidapi-key or api-market-key. Subscribe to the Specwise API (free plan) at $RAPIDAPI_PRICING or $API_MARKET_PRICING and store the key as a secret."
   exit 1
 fi
-[[ -n ${INPUT_RAPIDAPI_KEY:-} ]] && echo "::add-mask::$INPUT_RAPIDAPI_KEY"
-[[ -n ${INPUT_API_MARKET_KEY:-} ]] && echo "::add-mask::$INPUT_API_MARKET_KEY"
+[[ -n ${INPUT_RAPIDAPI_KEY:-} ]] && wf add-mask "$INPUT_RAPIDAPI_KEY"
+[[ -n ${INPUT_API_MARKET_KEY:-} ]] && wf add-mask "$INPUT_API_MARKET_KEY"
 
 PR=""
 if [[ ${GITHUB_EVENT_NAME:-} == pull_request* && -f ${GITHUB_EVENT_PATH:-} ]]; then
@@ -64,7 +63,7 @@ BASE_COMMIT=""
 if [[ -n $BASE_REF ]]; then
   BASE_COMMIT="$(resolve_base "$BASE_REF")"
 else
-  echo "::notice::No base to compare against for this event (set base-ref): specs can only be validated."
+  wf notice "No base to compare against for this event (set base-ref): specs can only be validated."
 fi
 
 # 3. One diff request per changed spec (plus one validate request with validate: true)
@@ -84,7 +83,7 @@ api() { # api ENDPOINT BODY_FILE → sets $code and leaves the response in $WORK
     tries=$((tries + 1)); sleep "${SPECWISE_RATE_DELAY:-$tries}"
     code="$(call_api "$1" "$2" "$WORK/resp.json" "$WORK/headers.txt")"; requests=$((requests + 1))
   done
-  local q; q="$(header_value "$WORK/headers.txt" x-ratelimit-requests-remaining)"; [[ -n $q ]] && quota="$q"
+  local q; q="$(header_value "$WORK/headers.txt" x-ratelimit-requests-remaining)"; [[ $q =~ ^[0-9]{1,9}$ ]] && quota="$q"
   return 0
 }
 not_analysed() { # not_analysed FILE REASON
@@ -97,45 +96,45 @@ handle_error() {
   if [[ $code == 400 ]] && grep -qi 'api-market-key' "$WORK/resp.json" 2>/dev/null; then kind=401; fi
   case "$kind" in
     401|403)
-      detail="$(jq -r '.message // empty' "$WORK/resp.json" 2>/dev/null || true)"
-      echo "::error::Specwise refused the key (HTTP $code${detail:+: $detail}). Subscribe (free plan) at $PRICING."
+      detail="$(jq -r '.message // empty | tostring' "$WORK/resp.json" 2>/dev/null || true)"; detail="${detail:0:200}"
+      wf error "Specwise refused the key (HTTP $code${detail:+: $detail}). Subscribe (free plan) at $PRICING."
       not_analysed "$f" "key refused (HTTP $code)"; stop="key refused" ;;
     413)
-      echo "::warning file=$f::Specwise skipped this spec: request too large."
+      wf_file warning "$f" "Specwise skipped this spec: request too large."
       record --arg file "$f" --arg reason "request too large (HTTP 413)" '{file: $file, status: "skipped", reason: $reason}' ;;
     422)
       detail="$(jq -r '.detail | if type == "string" then . else tostring end' "$WORK/resp.json" 2>/dev/null || echo "invalid input")"
       if [[ $detail == base\ * ]]; then
         # the old version is broken: not this change's fault, and nothing to compare with
-        echo "::warning file=$f::Specwise couldn't read the base version of this spec: $detail"
+        wf_file warning "$f" "Specwise couldn't read the base version of this spec: $detail"
         record --arg file "$f" --arg reason "base version unreadable: $detail" '{file: $file, status: "skipped", reason: $reason}'
       else
         line="$(grep -oE 'line [0-9]+' <<<"$detail" | head -1 | grep -oE '[0-9]+' || true)"
-        echo "::error file=$f${line:+,line=$line},title=Specwise could not parse this spec::$detail"
+        wf_at error "$f" "$line" "Specwise could not parse this spec" "$detail"
         record --arg file "$f" --arg detail "$detail" '{file: $file, status: "invalid", reason: $detail}'
       fi ;;
     429)
       if ! quota_429; then
-        echo "::warning::Specwise rate limit (HTTP 429) after 3 retries: the remaining specs were not checked. Your build is not failed because of it."
+        wf warning "Specwise rate limit (HTTP 429) after 3 retries: the remaining specs were not checked. Your build is not failed because of it."
         not_analysed "$f" "rate limited (HTTP 429)"; stop="rate limited"; return 0
       fi
       if [[ ${INPUT_ON_QUOTA_EXCEEDED:-warn} == fail ]]; then
-        echo "::error::Specwise monthly quota exhausted. Upgrade at $PRICING."
+        wf error "Specwise monthly quota exhausted. Upgrade at $PRICING."
         record --arg file "$f" '{file: $file, status: "failed", reason: "quota exhausted (HTTP 429)"}'
       else
-        echo "::warning::Specwise monthly quota exhausted: the remaining specs were not checked. Upgrade at $PRICING."
+        wf warning "Specwise monthly quota exhausted: the remaining specs were not checked. Upgrade at $PRICING."
         not_analysed "$f" "quota exhausted (HTTP 429)"
       fi
       stop="quota exhausted" ;;
     *)
-      echo "::warning::Specwise API unavailable (HTTP $code): the remaining specs were not checked. Your build is not failed because of it."
+      wf warning "Specwise API unavailable (HTTP $code): the remaining specs were not checked. Your build is not failed because of it."
       not_analysed "$f" "API unavailable (HTTP $code)"; stop="API unavailable" ;;
   esac
 }
 
 while IFS= read -r f; do
   [[ -z $f ]] && continue
-  [[ -f $f ]] || continue
+  [[ -f $f && ! -L $f ]] || continue
   base="$WORK/base"; rm -f "$base"
   if [[ -n $BASE_REF ]]; then
     set +e; base_file "$BASE_COMMIT" "$BASE_REF" "$f" "$base"; rc=$?; set -e
@@ -143,7 +142,7 @@ while IFS= read -r f; do
     rc=1
   fi
   if [[ $rc -eq 2 ]]; then
-    echo "::warning file=$f::Couldn't read the base version of this spec."
+    wf_file warning "$f" "Couldn't read the base version of this spec."
     record --arg file "$f" '{file: $file, status: "skipped", reason: "base version unreadable"}'; continue
   fi
   if [[ $rc -eq 0 ]] && cmp -s "$base" "$f"; then
@@ -182,14 +181,14 @@ while IFS= read -r f; do
     elif [[ $status == new ]]; then
       handle_error "$f"; continue
     else
-      echo "::warning file=$f::Specwise couldn't validate this spec (HTTP $code); the diff is still reported."
+      wf_file warning "$f" "Specwise couldn't validate this spec (HTTP $code); the diff is still reported."
     fi
   fi
   record --arg file "$f" --arg status "$status" --slurpfile d "$WORK/diff.json" --slurpfile v "$WORK/validate.json" \
     '{file: $file, status: $status, diff: $d[0], validate: $v[0]}'
 done < <(discover)
 if [[ ! -s $RESULTS ]]; then
-  echo "::notice::No tracked file matches spec-paths ($INPUT_SPEC_PATHS)."
+  wf notice "No tracked file matches spec-paths ($INPUT_SPEC_PATHS)."
 fi
 
 # 4. A label can accept the breaking changes
@@ -218,7 +217,7 @@ jq -s -r --arg breaking_level "$level" -f "$HERE/annotate.jq" "$RESULTS"
 
 # 7. Report: job summary, and a pull request comment that is updated on every run
 if [[ -n $quota && $quota =~ ^[0-9]+$ ]] && (( quota < 3 )); then
-  echo "::warning::Only $quota Specwise requests left this month. Plans: $PRICING"
+  wf warning "Only $quota Specwise requests left this month. Plans: $PRICING"
 fi
 head_sha="${GITHUB_SHA:-}"
 [[ -n $PR ]] && head_sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")"
@@ -233,24 +232,33 @@ cat "$WORK/report.md" >> "$SUMMARY"
 comment_url=""
 if [[ $COMMENT == true && -n $PR ]]; then
   existing=""
+  # Only a comment written by the token's own user counts as ours: github-actions[bot] for the default token,
+  # else whoever GET /user says (an installation token gets 403 there).
+  author="github-actions[bot]"
+  if [[ $(gh_api GET user "$WORK/me.json") == 200 ]]; then
+    me="$(jq -r '.login // empty' "$WORK/me.json" 2>/dev/null || true)"; [[ -n $me ]] && author="$me"
+  fi
   for page in 1 2 3 4 5 6 7 8 9 10; do
     [[ $(gh_api GET "repos/${GITHUB_REPOSITORY:-}/issues/$PR/comments?per_page=100&page=$page" "$WORK/comments.json") == 200 ]] || break
-    existing="$(jq -r --arg m "$MARKER" 'map(select(.body | contains($m))) | first | .id // empty' "$WORK/comments.json")"
+    existing="$(jq -r --arg m "$MARKER" --arg a "$author" \
+      'map(select(.user.login == $a and (.body // "" | startswith($m)))) | first | .id // empty' "$WORK/comments.json")"
     [[ -n $existing || $(jq 'length' "$WORK/comments.json") -lt 100 ]] && break
   done
   worth="$(jq -s 'any(.[]; .status == "compared" or .status == "new" or .status == "invalid" or .status == "failed"
     or .status == "not_analysed")' "$RESULTS")"
   if [[ -n $existing || $worth == true ]]; then
     { printf '%s\n' "$MARKER"; cat "$WORK/report.md"; } | jq -Rs '{body: .}' > "$WORK/comment.json"
+    code=000
     if [[ -n $existing ]]; then
       code="$(gh_api PATCH "repos/${GITHUB_REPOSITORY:-}/issues/comments/$existing" "$WORK/comment-resp.json" "$WORK/comment.json")"
-    else
+    fi
+    if [[ ! $code =~ ^2 ]]; then # no comment of ours, or the update was refused: post a new one
       code="$(gh_api POST "repos/${GITHUB_REPOSITORY:-}/issues/$PR/comments" "$WORK/comment-resp.json" "$WORK/comment.json")"
     fi
     if [[ $code =~ ^2 ]]; then
       comment_url="$(jq -r '.html_url // empty' "$WORK/comment-resp.json")"
     else
-      echo "::notice::Couldn't comment on the pull request (HTTP $code): give the job \`pull-requests: write\`. The report is in the job summary."
+      wf notice "Couldn't comment on the pull request (HTTP $code): give the job \`pull-requests: write\`. The report is in the job summary."
     fi
   fi
 fi
@@ -285,7 +293,7 @@ if [[ $passed != true ]]; then
   (( n > 0 )) && why+=("$n spec(s) could not be parsed")
   if (( ${#why[@]} > 0 )); then
     msg="$(IFS=';'; echo "${why[*]}")"
-    echo "::error title=Specwise check failed::${msg//;/; }. The report lists every change."
+    printf '::error title=Specwise check failed::%s\n' "$(esc_data "${msg//;/; }. The report lists every change.")"
   fi
 fi
 [[ $passed == true ]]
